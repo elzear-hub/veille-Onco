@@ -68,17 +68,16 @@ def fetch_trials():
     """Récupère les essais de phase 1-2 en oncologie."""
     url = "https://clinicaltrials.gov/api/v2/studies"
 
-    # Paramètres simplifiés au maximum pour éviter les erreurs 400
-    params = {
-        "query.cond": "cancer oncology tumor",
-        "filter.phase": "PHASE1,PHASE2",
-        "filter.overallStatus": "RECRUITING",
-        "pageSize": 50,
-        "format": "json",
-        "sort": "LastUpdatePostDate:desc",
-    }
-
-    r = requests.get(url, params=params, timeout=30)
+    # Construire l'URL manuellement pour éviter l'encodage des caractères spéciaux
+    query_string = (
+        "query.cond=cancer+oncology+tumor"
+        "&filter.phase=PHASE1,PHASE2"
+        "&filter.overallStatus=RECRUITING"
+        "&pageSize=50"
+        "&format=json"
+    )
+    full_url = f"{url}?{query_string}"
+    r = requests.get(full_url, timeout=30)
     r.raise_for_status()
     data = r.json()
     studies = data.get("studies", [])
