@@ -1,0 +1,36 @@
+name: Veille Essais Cliniques Hebdomadaire
+
+on:
+  schedule:
+    # Tous les vendredis à 8h heure de Paris (UTC+2 en été = 6h UTC)
+    - cron: '0 6 * * 5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  essais:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4.2.2
+
+      - name: Installation de Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: '3.11'
+
+      - name: Installation des dépendances
+        run: pip install requests
+
+      - name: Lancement de la veille essais cliniques
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          EMAIL_DEST: ${{ secrets.EMAIL_DEST }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+        run: python essais_cliniques.py
