@@ -1,7 +1,7 @@
 """
-Veille essais cliniques en cancérologie v2
+Veille essais cliniques en cancérologie v3
 - Essais de phase 1 et 2 en recrutement
-- Source : ClinicalTrials.gov API (gratuite, officielle)
+- Source : ClinicalTrials.gov API v2 (gratuite, officielle)
 - Résumés en français via Groq
 - Envoi hebdomadaire (vendredi matin)
 """
@@ -10,7 +10,7 @@ import requests
 import smtplib
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -65,19 +65,20 @@ def save_memory(memory):
 # ── ClinicalTrials.gov ────────────────────────────────────────────────────────
 
 def fetch_trials():
-    """Récupère les essais de phase 1-2 en oncologie via ClinicalTrials API v2."""
+    """Récupère les essais de phase 1-2 en oncologie."""
     url = "https://clinicaltrials.gov/api/v2/studies"
 
+    # Paramètres simplifiés au maximum pour éviter les erreurs 400
     params = {
-        "query.cond": "cancer OR oncology OR tumor OR carcinoma OR leukemia OR lymphoma",
-        "filter.phase": "PHASE1|PHASE2",
+        "query.cond": "cancer oncology tumor",
+        "filter.phase": "PHASE1,PHASE2",
         "filter.overallStatus": "RECRUITING",
         "pageSize": 50,
-        "sort": "@relevance",
         "format": "json",
+        "sort": "LastUpdatePostDate:desc",
     }
 
-    r = requests.get(url, params=params, timeout=20)
+    r = requests.get(url, params=params, timeout=30)
     r.raise_for_status()
     data = r.json()
     studies = data.get("studies", [])
@@ -133,28 +134,26 @@ def fetch_trials():
 
 
 def pick_new_trials(trials, sent_ids):
-    """Sélectionne les essais pas encore envoyés."""
-    new = [t for t in trials if t["nct_id"] not in sent_ids]
-    return new[:MAX_ESSAIS]
+    return [t for t in trials if t["nct_id"] not in sent_ids][:MAX_ESSAIS]
 
 
 # ── Groq ──────────────────────────────────────────────────────────────────────
 
 def summarize_trial(trial):
-    prompt = f"""Tu es un oncologue expert en recherche clinique. Résume cet essai clinique en français pour un étudiant en master d'oncologie.
+    prompt = f"""Tu es un oncologue expert. Résume cet essai clinique en français pour un étudiant en master d'oncologie.
 
 Titre : {trial['title']}
 Phase : {trial['phase']}
-Intervention : {trial['intervention']}
+Traitement : {trial['intervention']}
 Résumé : {trial['summary']}
 
-Fournis un résumé structuré en français avec exactement ce format :
-🎯 OBJECTIF : (1 phrase claire)
-💊 TRAITEMENT TESTÉ : (nom et type d'intervention)
-👥 POPULATION CIBLE : (type de cancer et critères principaux)
-📊 DESIGN : (phase, nombre de patients prévu)
+Format exact attendu :
+🎯 OBJECTIF : (1 phrase)
+💊 TRAITEMENT TESTÉ : (nom et type)
+👥 POPULATION CIBLE : (type de cancer et critères)
+📊 DESIGN : (phase et nombre de patients)
 🌍 CONTEXTE : (sponsor et pays)
-💡 INTÉRÊT SCIENTIFIQUE : (pourquoi cet essai est important, 1-2 phrases)"""
+💡 INTÉRÊT SCIENTIFIQUE : (1-2 phrases sur l'importance)"""
 
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -247,7 +246,7 @@ def send_email(html_content, count):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Démarrage veille essais cliniques v2...")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Démarrage veille essais cliniques v3...")
 
     print("  → Chargement de la mémoire...")
     memory = load_memory()
