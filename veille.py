@@ -1,9 +1,10 @@
 """
-Veille scientifique automatique en cancérologie v2
+Veille scientifique automatique en cancérologie v3
 - 1 article par journal par jour (rotation progressive)
-- Mémoire des articles déjà envoyés (stockée dans sent_articles.json)
+- Mémoire des articles déjà envoyés (sent_articles.json)
+- Liste de subscribers (subscribers.json)
+- Ton pédagogique rigoureux pour étudiants M2
 - Journaux : NEJM, Lancet Oncology, Nature Medicine
-- Résumés en français via Groq
 """
 
 import requests
@@ -14,14 +15,14 @@ from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import xml.etree.ElementTree as ET
+import base64
 
 # ─── CONFIGURATION ────────────────────────────────────────────────────────────
 GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
 GMAIL_ADDRESS  = os.environ["GMAIL_ADDRESS"]
 GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
-EMAIL_DEST     = os.environ["EMAIL_DEST"]
 GITHUB_TOKEN   = os.environ["GITHUB_TOKEN"]
-GITHUB_REPO    = os.environ["GITHUB_REPO"]   # format: "username/repo-name"
+GITHUB_REPO    = os.environ["GITHUB_REPO"]
 
 JOURNALS = [
     "N Engl J Med",
@@ -32,60 +33,76 @@ JOURNALS = [
 KEYWORDS = "cancer OR oncology OR tumor OR carcinoma OR chemotherapy OR immunotherapy OR radiotherapy"
 DAYS_BACK = 30
 MEMORY_FILE = "sent_articles.json"
+SUBSCRIBERS_FILE = "subscribers.json"
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-# ── Mémoire GitHub ────────────────────────────────────────────────────────────
+# ── GitHub helpers ────────────────────────────────────────────────────────────
 
-def load_memory():
-    """Charge la liste des articles déjà envoyés depuis GitHub."""
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{MEMORY_FILE}"
+def github_get(filename):
+    """Lit un fichier JSON depuis GitHub, retourne (data, sha)."""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     r = requests.get(url, headers=headers, timeout=15)
     if r.status_code == 404:
-        return {"sent": []}
+        return None, None
     r.raise_for_status()
-    import base64
     content = base64.b64decode(r.json()["content"]).decode("utf-8")
-    data = json.loads(content)
-    data["_sha"] = r.json()["sha"]
-    return data
+    return json.loads(content), r.json()["sha"]
 
 
-def save_memory(memory):
-    """Sauvegarde la mémoire dans GitHub."""
-    import base64
-    sha = memory.pop("_sha", None)
-    content = base64.b64encode(json.dumps(memory, indent=2).encode()).decode()
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{MEMORY_FILE}"
+def github_put(filename, data, sha, message):
+    """Écrit un fichier JSON dans GitHub."""
+    content = base64.b64encode(json.dumps(data, indent=2).encode()).decode()
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
     headers = {
         "Authorization": f"token {GITHUB_TOKEN}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "message": f"Mise à jour mémoire veille {datetime.now().strftime('%Y-%m-%d')}",
-        "content": content,
-    }
+    payload = {"message": message, "content": content}
     if sha:
         payload["sha"] = sha
     r = requests.put(url, headers=headers, json=payload, timeout=15)
     r.raise_for_status()
 
 
+def load_subscribers():
+    """Charge la liste des emails depuis subscribers.json."""
+    data, _ = github_get(SUBSCRIBERS_FILE)
+    if not data:
+        return []
+    return data.get("emails", [])
+
+
+def load_memory():
+    data, sha = github_get(MEMORY_FILE)
+    if not data:
+        return {"sent": [], "_sha": None}
+    data["_sha"] = sha
+    return data
+
+
+def save_memory(memory):
+    sha = memory.pop("_sha", None)
+    github_put(
+        MEMORY_FILE,
+        memory,
+        sha,
+        f"Mise à jour mémoire {datetime.now().strftime('%Y-%m-%d')}"
+    )
+
+
 # ── PubMed ────────────────────────────────────────────────────────────────────
 
 def fetch_articles_for_journal(journal):
-    """Récupère les articles des 30 derniers jours pour un journal donné."""
+    """Récupère les articles des 30 derniers jours pour un journal."""
     since = (datetime.now() - timedelta(days=DAYS_BACK)).strftime("%Y/%m/%d")
     query = f'({KEYWORDS}) AND "{journal}"[Journal] AND ("{since}"[PDAT] : "3000"[PDAT])'
 
     search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     params = {
-        "db": "pubmed",
-        "term": query,
-        "retmax": 50,
-        "retmode": "json",
-        "sort": "pub+date",
+        "db": "pubmed", "term": query,
+        "retmax": 50, "retmode": "json", "sort": "pub+date",
     }
     r = requests.get(search_url, params=params, timeout=15)
     r.raise_for_status()
@@ -93,11 +110,11 @@ def fetch_articles_for_journal(journal):
     if not ids:
         return []
 
-    fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-    rf = requests.get(fetch_url, params={
-        "db": "pubmed", "id": ",".join(ids),
-        "retmode": "xml", "rettype": "abstract"
-    }, timeout=15)
+    rf = requests.get(
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+        params={"db": "pubmed", "id": ",".join(ids), "retmode": "xml", "rettype": "abstract"},
+        timeout=15
+    )
     rf.raise_for_status()
 
     root = ET.fromstring(rf.text)
@@ -114,16 +131,13 @@ def fetch_articles_for_journal(journal):
                 last = authors[0].findtext("LastName", "")
                 fore = authors[0].findtext("ForeName", "")
                 first_author = f"{last} {fore}".strip()
-            pub_date = article.findtext(".//PubDate/Year", "") or ""
+            pub_year = article.findtext(".//PubDate/Year", "")
 
             if title and abstract and len(abstract) > 100:
                 articles.append({
-                    "pmid": pmid,
-                    "title": title,
-                    "abstract": abstract[:2000],
-                    "journal": journal,
-                    "author": first_author,
-                    "year": pub_date,
+                    "pmid": pmid, "title": title,
+                    "abstract": abstract[:2000], "journal": journal,
+                    "author": first_author, "year": pub_year,
                     "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
                 })
         except Exception:
@@ -132,41 +146,35 @@ def fetch_articles_for_journal(journal):
 
 
 def pick_next_article(articles, sent_pmids):
-    """Choisit le prochain article pas encore envoyé."""
     for article in articles:
         if article["pmid"] not in sent_pmids:
             return article
-    # Tous envoyés → on repart du début (reset pour ce journal)
-    if articles:
-        return articles[0]
-    return None
+    return articles[0] if articles else None
 
 
 # ── Groq ──────────────────────────────────────────────────────────────────────
 
 def summarize_article(article):
-    """Résume un article en français via Groq."""
-    prompt = f"""Tu es un médecin oncologue. Résume cet article scientifique en français pour un confrère.
+    prompt = f"""Tu es un enseignant-chercheur en oncologie. Rédige un résumé pédagogique de cet article pour des étudiants en Master 2 de cancérologie.
+
+Le résumé doit être rigoureux scientifiquement, utiliser la terminologie appropriée, mais rester accessible et formatif. Explique brièvement le contexte si nécessaire.
 
 Titre : {article['title']}
 Journal : {article['journal']}
 Résumé original : {article['abstract']}
 
-Fournis un résumé structuré en français avec exactement ce format :
-🎯 OBJECTIF : (1 phrase)
-🔬 MÉTHODE : (1-2 phrases)
-📊 RÉSULTATS CLÉS : (2-3 points essentiels)
-💡 IMPLICATION CLINIQUE : (1 phrase sur l'impact pratique)"""
+Format attendu en français :
+🔬 CONTEXTE & OBJECTIF : (2-3 phrases : pourquoi cette question est importante, quel est l'objectif)
+⚗️ MÉTHODE : (design de l'étude, population, intervention, critères de jugement principaux)
+📊 RÉSULTATS : (résultats clés avec données chiffrées si disponibles)
+🧠 INTERPRÉTATION : (ce que ça signifie, limites éventuelles, niveau de preuve)
+💡 À RETENIR : (1 phrase synthétique pour un étudiant en M2)"""
 
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 400,
-        "temperature": 0.3,
+        "max_tokens": 500, "temperature": 0.3,
     }
     r = requests.post("https://api.groq.com/openai/v1/chat/completions",
                       headers=headers, json=payload, timeout=30)
@@ -184,7 +192,7 @@ def build_email_html(articles_with_summaries):
         cards += f"""
         <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;
                     padding:24px;margin-bottom:20px;">
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;">
             <span style="background:#EEF2FF;color:#4338CA;font-size:12px;font-weight:600;
                          padding:3px 10px;border-radius:20px;">{article['journal']}</span>
             <span style="color:#9ca3af;font-size:12px;">{article['author']} {article['year']}</span>
@@ -192,7 +200,7 @@ def build_email_html(articles_with_summaries):
           <h3 style="margin:0 0 14px;font-size:15px;color:#111827;line-height:1.5;">
             {article['title']}
           </h3>
-          <div style="font-size:14px;color:#374151;line-height:1.8;">
+          <div style="font-size:14px;color:#374151;line-height:1.9;">
             {summary_html}
           </div>
           <a href="{article['url']}"
@@ -204,7 +212,7 @@ def build_email_html(articles_with_summaries):
 
     if not articles_with_summaries:
         cards = """<div style="text-align:center;padding:40px;color:#6b7280;">
-            Aucun article disponible pour le moment.
+            Aucun nouvel article disponible aujourd'hui.
         </div>"""
 
     return f"""<!DOCTYPE html>
@@ -219,27 +227,39 @@ def build_email_html(articles_with_summaries):
     </div>
     {cards}
     <div style="text-align:center;margin-top:28px;color:#9ca3af;font-size:12px;">
-      Généré automatiquement · Résumés par IA · Toujours vérifier l'article original
+      Veille automatique M2 Oncologie · Résumés par IA · Toujours vérifier l'article original
     </div>
   </div>
 </body></html>"""
 
 
-def send_email(html_content):
+def send_email(html_content, recipients):
+    """Envoie l'email à tous les subscribers."""
+    if not recipients:
+        print("  ⚠ Aucun subscriber trouvé !")
+        return
+
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"🔬 Veille Oncologie — {datetime.now().strftime('%d/%m/%Y')}"
+    msg["Subject"] = f"🔬 Veille Oncologie M2 — {datetime.now().strftime('%d/%m/%Y')}"
     msg["From"] = GMAIL_ADDRESS
-    msg["To"] = EMAIL_DEST
+    msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(html_content, "html"))
+
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(GMAIL_ADDRESS, GMAIL_PASSWORD)
-        server.sendmail(GMAIL_ADDRESS, EMAIL_DEST, msg.as_string())
+        server.sendmail(GMAIL_ADDRESS, recipients, msg.as_string())
+
+    print(f"  ✓ Email envoyé à {len(recipients)} destinataire(s)")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Démarrage veille oncologie v2...")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Démarrage veille oncologie v3...")
+
+    print("  → Chargement des subscribers...")
+    recipients = load_subscribers()
+    print(f"  → {len(recipients)} destinataire(s)")
 
     print("  → Chargement de la mémoire...")
     memory = load_memory()
@@ -249,10 +269,9 @@ def main():
     new_sent = []
 
     for journal in JOURNALS:
-        print(f"  → Recherche articles : {journal}")
+        print(f"  → Recherche : {journal}")
         articles = fetch_articles_for_journal(journal)
         print(f"     {len(articles)} article(s) trouvé(s)")
-
         article = pick_next_article(articles, sent_pmids)
         if article:
             print(f"     Résumé : {article['title'][:60]}...")
@@ -262,14 +281,12 @@ def main():
 
     print("  → Envoi de l'email...")
     html = build_email_html(results)
-    send_email(html)
+    send_email(html, recipients)
 
-    # Mise à jour mémoire (on garde les 500 derniers pour ne pas grossir indéfiniment)
-    updated_sent = list(sent_pmids) + new_sent
-    memory["sent"] = updated_sent[-500:]
+    updated = list(sent_pmids) + new_sent
+    memory["sent"] = updated[-500:]
     save_memory(memory)
-
-    print("  ✓ Terminé avec succès !")
+    print("  ✓ Terminé !")
 
 
 if __name__ == "__main__":
