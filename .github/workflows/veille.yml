@@ -2,10 +2,12 @@ name: Veille Oncologie Quotidienne
 
 on:
   schedule:
-    # Tous les matins à 8h00 (heure de Paris = 6h UTC en été, 7h UTC en hiver)
-    # On met 6h UTC pour couvrir l'heure d'été
-    - cron: '0 7 * * *'
-  workflow_dispatch:  # permet aussi de lancer manuellement depuis GitHub
+    # Lundi au vendredi à 8h heure de Paris (UTC+2 en été = 6h UTC)
+    - cron: '0 6 * * 1-6'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   veille:
@@ -13,10 +15,10 @@ jobs:
 
     steps:
       - name: Récupération du code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Installation de Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0
         with:
           python-version: '3.11'
 
@@ -29,4 +31,6 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
           EMAIL_DEST: ${{ secrets.EMAIL_DEST }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
         run: python veille.py
