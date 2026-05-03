@@ -1,6 +1,6 @@
 """
-Veille essais cliniques en cancérologie v1
-- Essais de phase 1 et 2 récemment ouverts ou mis à jour
+Veille essais cliniques en cancérologie v2
+- Essais de phase 1 et 2 en recrutement
 - Source : ClinicalTrials.gov API (gratuite, officielle)
 - Résumés en français via Groq
 - Envoi hebdomadaire (vendredi matin)
@@ -24,7 +24,6 @@ GITHUB_REPO    = os.environ["GITHUB_REPO"]
 
 MAX_ESSAIS = 5
 MEMORY_FILE = "sent_trials.json"
-DAYS_BACK = 7
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -66,28 +65,24 @@ def save_memory(memory):
 # ── ClinicalTrials.gov ────────────────────────────────────────────────────────
 
 def fetch_trials():
-    """Récupère les essais de phase 1-2 en oncologie récemment mis à jour."""
+    """Récupère les essais de phase 1-2 en oncologie via ClinicalTrials API v2."""
     url = "https://clinicaltrials.gov/api/v2/studies"
+
     params = {
         "query.cond": "cancer OR oncology OR tumor OR carcinoma OR leukemia OR lymphoma",
-        "filter.phase": "PHASE1,PHASE2",
+        "filter.phase": "PHASE1|PHASE2",
         "filter.overallStatus": "RECRUITING",
-        "query.term": "",
         "pageSize": 50,
-        "sort": "LastUpdatePostDate:desc",
-        "fields": "NCTId,BriefTitle,OfficialTitle,Phase,OverallStatus,BriefSummary,"
-                  "Condition,InterventionName,InterventionType,LeadSponsorName,"
-                  "StartDate,PrimaryCompletionDate,LocationCountry,LastUpdatePostDate,"
-                  "EligibilityCriteria,EnrollmentCount",
+        "sort": "@relevance",
+        "format": "json",
     }
+
     r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
     data = r.json()
     studies = data.get("studies", [])
 
     trials = []
-    since = datetime.now() - timedelta(days=DAYS_BACK)
-
     for study in studies:
         try:
             proto = study.get("protocolSection", {})
@@ -97,7 +92,6 @@ def fetch_trials():
             design_mod = proto.get("designModule", {})
             arms_mod = proto.get("armsInterventionsModule", {})
             sponsor_mod = proto.get("sponsorCollaboratorsModule", {})
-            eligibility_mod = proto.get("eligibilityModule", {})
             locations_mod = proto.get("contactsLocationsModule", {})
 
             nct_id = id_mod.get("nctId", "")
@@ -106,22 +100,18 @@ def fetch_trials():
             phases = design_mod.get("phases", [])
             phase_str = ", ".join(phases) if phases else "N/A"
             status = status_mod.get("overallStatus", "")
-            last_update = status_mod.get("lastUpdatePostDateStruct", {}).get("date", "")
-            start_date = status_mod.get("startDateStruct", {}).get("date", "")
             sponsor = sponsor_mod.get("leadSponsor", {}).get("name", "")
             enrollment = design_mod.get("enrollmentInfo", {}).get("count", "N/A")
 
-            # Interventions
             interventions = arms_mod.get("interventions", [])
             intervention_names = [i.get("name", "") for i in interventions[:3]]
-            intervention_str = ", ".join(intervention_names) if intervention_names else "N/A"
+            intervention_str = ", ".join(filter(None, intervention_names)) or "N/A"
 
-            # Pays
             locations = locations_mod.get("locations", [])
             countries = list(set(l.get("country", "") for l in locations if l.get("country")))
-            countries_str = ", ".join(countries[:5]) if countries else "N/A"
+            countries_str = ", ".join(countries[:4]) if countries else "N/A"
 
-            if not title or not summary:
+            if not title or not summary or len(summary) < 50:
                 continue
 
             trials.append({
@@ -134,8 +124,6 @@ def fetch_trials():
                 "intervention": intervention_str,
                 "countries": countries_str,
                 "enrollment": enrollment,
-                "start_date": start_date,
-                "last_update": last_update,
                 "url": f"https://clinicaltrials.gov/study/{nct_id}",
             })
         except Exception:
@@ -153,7 +141,6 @@ def pick_new_trials(trials, sent_ids):
 # ── Groq ──────────────────────────────────────────────────────────────────────
 
 def summarize_trial(trial):
-    """Résume un essai clinique en français via Groq."""
     prompt = f"""Tu es un oncologue expert en recherche clinique. Résume cet essai clinique en français pour un étudiant en master d'oncologie.
 
 Titre : {trial['title']}
@@ -195,13 +182,13 @@ def build_email_html(trials_with_summaries):
     for trial, summary in trials_with_summaries:
         summary_html = summary.replace("\n", "<br>")
         phase_color = "#EEF2FF" if "1" in trial['phase'] else "#F0FDF4"
-        phase_text_color = "#4338CA" if "1" in trial['phase'] else "#166534"
+        phase_text = "#4338CA" if "1" in trial['phase'] else "#166534"
 
         cards += f"""
         <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;
                     padding:24px;margin-bottom:20px;">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
-            <span style="background:{phase_color};color:{phase_text_color};font-size:12px;
+            <span style="background:{phase_color};color:{phase_text};font-size:12px;
                          font-weight:600;padding:3px 10px;border-radius:20px;">{trial['phase']}</span>
             <span style="background:#FEF3C7;color:#92400E;font-size:12px;
                          font-weight:600;padding:3px 10px;border-radius:20px;">{trial['status']}</span>
@@ -210,7 +197,7 @@ def build_email_html(trials_with_summaries):
           <h3 style="margin:0 0 14px;font-size:15px;color:#111827;line-height:1.5;">
             {trial['title']}
           </h3>
-          <div style="font-size:13px;color:#6b7280;margin-bottom:12px;line-height:1.6;">
+          <div style="font-size:13px;color:#6b7280;margin-bottom:12px;">
             🏢 {trial['sponsor']} &nbsp;·&nbsp; 👥 {trial['enrollment']} patients &nbsp;·&nbsp; 🌍 {trial['countries']}
           </div>
           <div style="font-size:14px;color:#374151;line-height:1.8;">
@@ -235,7 +222,7 @@ def build_email_html(trials_with_summaries):
     <div style="text-align:center;margin-bottom:28px;">
       <h1 style="font-size:22px;color:#111827;margin:0 0 6px;">🧪 Essais Cliniques Oncologie</h1>
       <p style="color:#6b7280;font-size:14px;margin:0;">
-        Semaine du {date_str} · {count} essai(s) de phase 1-2 · ClinicalTrials.gov
+        Semaine du {date_str} · {count} essai(s) phase 1-2 · ClinicalTrials.gov
       </p>
     </div>
     {cards}
@@ -260,7 +247,7 @@ def send_email(html_content, count):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Démarrage veille essais cliniques...")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Démarrage veille essais cliniques v2...")
 
     print("  → Chargement de la mémoire...")
     memory = load_memory()
@@ -283,7 +270,6 @@ def main():
     html = build_email_html(results)
     send_email(html, len(results))
 
-    # Mise à jour mémoire
     updated = list(sent_ids) + [t["nct_id"] for t in new_trials]
     memory["sent"] = updated[-1000:]
     save_memory(memory)
