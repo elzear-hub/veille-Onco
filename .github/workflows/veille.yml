@@ -4,7 +4,7 @@ on:
   schedule:
     # Tous les matins à 8h00 (heure de Paris = 6h UTC en été, 7h UTC en hiver)
     # On met 6h UTC pour couvrir l'heure d'été
-    - cron: '0 6 * * *'
+    - cron: '0 7 * * *'
   workflow_dispatch:  # permet aussi de lancer manuellement depuis GitHub
 
 jobs:
