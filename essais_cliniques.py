@@ -1,15 +1,16 @@
 """
-Veille essais cliniques en cancérologie v3
-- Essais de phase 1 et 2 en recrutement
-- Source : ClinicalTrials.gov API v2 (gratuite, officielle)
+Veille essais cliniques en cancérologie v4
+- Source : flux RSS officiel ClinicalTrials.gov (pas d'API, pas de clé)
+- Essais de phase 1-2 en recrutement, oncologie
 - Résumés en français via Groq
-- Envoi hebdomadaire (vendredi matin)
+- Envoi hebdomadaire
 """
 
 import requests
 import smtplib
 import json
 import os
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -24,6 +25,13 @@ GITHUB_REPO    = os.environ["GITHUB_REPO"]
 
 MAX_ESSAIS = 5
 MEMORY_FILE = "sent_trials.json"
+
+# URLs RSS ClinicalTrials.gov — une par phase pour éviter tout problème
+RSS_URLS = [
+    "https://clinicaltrials.gov/rss.xml?rssfeed=findstudies&sel_flds=brief_title,overall_status,phase&query=cancer+oncology&recrs=a&phase=0&count=40",
+    "https://clinicaltrials.gov/rss.xml?rssfeed=findstudies&sel_flds=brief_title,overall_status,phase&query=cancer+oncology&recrs=a&phase=1&count=40",
+]
+# phase=0 = Phase 1, phase=1 = Phase 2 dans l'ancien système RSS
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -62,80 +70,52 @@ def save_memory(memory):
     r.raise_for_status()
 
 
-# ── ClinicalTrials.gov ────────────────────────────────────────────────────────
+# ── RSS ClinicalTrials ────────────────────────────────────────────────────────
 
-def fetch_trials():
-    """Récupère les essais de phase 1-2 en oncologie."""
-    url = "https://clinicaltrials.gov/api/v2/studies"
-
-    # Deux requêtes séparées pour éviter les problèmes d'encodage avec les virgules
-    all_studies = []
-    for phase in ["PHASE1", "PHASE2"]:
-        full_url = (
-            f"{url}?query.cond=cancer+oncology+tumor"
-            f"&filter.phase={phase}"
-            f"&filter.overallStatus=RECRUITING"
-            f"&pageSize=25"
-            f"&format=json"
-        )
-        r = requests.get(full_url, timeout=30)
-        r.raise_for_status()
-        all_studies.extend(r.json().get("studies", []))
-
-    # Déduplication par NCT ID
-    seen = set()
-    studies = []
-    for s in all_studies:
-        nct = s.get("protocolSection", {}).get("identificationModule", {}).get("nctId", "")
-        if nct and nct not in seen:
-            seen.add(nct)
-            studies.append(s)
-
+def fetch_trials_from_rss():
+    """Récupère les essais via les flux RSS ClinicalTrials.gov."""
     trials = []
-    for study in studies:
+    seen_ids = set()
+
+    for rss_url in RSS_URLS:
         try:
-            proto = study.get("protocolSection", {})
-            id_mod = proto.get("identificationModule", {})
-            status_mod = proto.get("statusModule", {})
-            desc_mod = proto.get("descriptionModule", {})
-            design_mod = proto.get("designModule", {})
-            arms_mod = proto.get("armsInterventionsModule", {})
-            sponsor_mod = proto.get("sponsorCollaboratorsModule", {})
-            locations_mod = proto.get("contactsLocationsModule", {})
+            r = requests.get(rss_url, timeout=20)
+            r.raise_for_status()
+            root = ET.fromstring(r.content)
 
-            nct_id = id_mod.get("nctId", "")
-            title = id_mod.get("briefTitle", "")
-            summary = desc_mod.get("briefSummary", "")
-            phases = design_mod.get("phases", [])
-            phase_str = ", ".join(phases) if phases else "N/A"
-            status = status_mod.get("overallStatus", "")
-            sponsor = sponsor_mod.get("leadSponsor", {}).get("name", "")
-            enrollment = design_mod.get("enrollmentInfo", {}).get("count", "N/A")
-
-            interventions = arms_mod.get("interventions", [])
-            intervention_names = [i.get("name", "") for i in interventions[:3]]
-            intervention_str = ", ".join(filter(None, intervention_names)) or "N/A"
-
-            locations = locations_mod.get("locations", [])
-            countries = list(set(l.get("country", "") for l in locations if l.get("country")))
-            countries_str = ", ".join(countries[:4]) if countries else "N/A"
-
-            if not title or not summary or len(summary) < 50:
+            # Namespace RSS
+            channel = root.find("channel")
+            if channel is None:
                 continue
 
-            trials.append({
-                "nct_id": nct_id,
-                "title": title,
-                "summary": summary[:1500],
-                "phase": phase_str,
-                "status": status,
-                "sponsor": sponsor,
-                "intervention": intervention_str,
-                "countries": countries_str,
-                "enrollment": enrollment,
-                "url": f"https://clinicaltrials.gov/study/{nct_id}",
-            })
-        except Exception:
+            for item in channel.findall("item"):
+                title = item.findtext("title", "").strip()
+                link = item.findtext("link", "").strip()
+                description = item.findtext("description", "").strip()
+                pub_date = item.findtext("pubDate", "").strip()
+
+                # Extraire le NCT ID depuis le lien
+                nct_id = ""
+                if "NCT" in link:
+                    parts = link.split("/")
+                    for p in parts:
+                        if p.startswith("NCT"):
+                            nct_id = p.split("?")[0]
+                            break
+
+                if not nct_id or nct_id in seen_ids:
+                    continue
+
+                seen_ids.add(nct_id)
+                trials.append({
+                    "nct_id": nct_id,
+                    "title": title,
+                    "description": description[:1500],
+                    "pub_date": pub_date,
+                    "url": f"https://clinicaltrials.gov/study/{nct_id}",
+                })
+        except Exception as e:
+            print(f"  ⚠ Erreur RSS {rss_url[:60]}: {e}")
             continue
 
     return trials
@@ -151,17 +131,13 @@ def summarize_trial(trial):
     prompt = f"""Tu es un oncologue expert. Résume cet essai clinique en français pour un étudiant en master d'oncologie.
 
 Titre : {trial['title']}
-Phase : {trial['phase']}
-Traitement : {trial['intervention']}
-Résumé : {trial['summary']}
+Description : {trial['description']}
 
 Format exact attendu :
 🎯 OBJECTIF : (1 phrase)
-💊 TRAITEMENT TESTÉ : (nom et type)
+💊 TRAITEMENT TESTÉ : (nom et type d'intervention)
 👥 POPULATION CIBLE : (type de cancer et critères)
-📊 DESIGN : (phase et nombre de patients)
-🌍 CONTEXTE : (sponsor et pays)
-💡 INTÉRÊT SCIENTIFIQUE : (1-2 phrases sur l'importance)"""
+💡 INTÉRÊT SCIENTIFIQUE : (pourquoi cet essai est important, 1-2 phrases)"""
 
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -170,7 +146,7 @@ Format exact attendu :
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 450,
+        "max_tokens": 400,
         "temperature": 0.3,
     }
     r = requests.post("https://api.groq.com/openai/v1/chat/completions",
@@ -188,25 +164,19 @@ def build_email_html(trials_with_summaries):
     cards = ""
     for trial, summary in trials_with_summaries:
         summary_html = summary.replace("\n", "<br>")
-        phase_color = "#EEF2FF" if "1" in trial['phase'] else "#F0FDF4"
-        phase_text = "#4338CA" if "1" in trial['phase'] else "#166534"
-
         cards += f"""
         <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;
                     padding:24px;margin-bottom:20px;">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
-            <span style="background:{phase_color};color:{phase_text};font-size:12px;
-                         font-weight:600;padding:3px 10px;border-radius:20px;">{trial['phase']}</span>
-            <span style="background:#FEF3C7;color:#92400E;font-size:12px;
-                         font-weight:600;padding:3px 10px;border-radius:20px;">{trial['status']}</span>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+            <span style="background:#EEF2FF;color:#4338CA;font-size:12px;font-weight:600;
+                         padding:3px 10px;border-radius:20px;">Phase 1-2</span>
+            <span style="background:#FEF3C7;color:#92400E;font-size:12px;font-weight:600;
+                         padding:3px 10px;border-radius:20px;">RECRUITING</span>
             <span style="color:#9ca3af;font-size:12px;">{trial['nct_id']}</span>
           </div>
           <h3 style="margin:0 0 14px;font-size:15px;color:#111827;line-height:1.5;">
             {trial['title']}
           </h3>
-          <div style="font-size:13px;color:#6b7280;margin-bottom:12px;">
-            🏢 {trial['sponsor']} &nbsp;·&nbsp; 👥 {trial['enrollment']} patients &nbsp;·&nbsp; 🌍 {trial['countries']}
-          </div>
           <div style="font-size:14px;color:#374151;line-height:1.8;">
             {summary_html}
           </div>
@@ -254,14 +224,14 @@ def send_email(html_content, count):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Démarrage veille essais cliniques v3...")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Démarrage veille essais cliniques v4...")
 
     print("  → Chargement de la mémoire...")
     memory = load_memory()
     sent_ids = set(memory.get("sent", []))
 
-    print("  → Recherche essais sur ClinicalTrials.gov...")
-    trials = fetch_trials()
+    print("  → Récupération des essais via RSS...")
+    trials = fetch_trials_from_rss()
     print(f"  → {len(trials)} essai(s) trouvé(s)")
 
     new_trials = pick_new_trials(trials, sent_ids)
