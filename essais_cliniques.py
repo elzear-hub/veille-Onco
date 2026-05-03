@@ -68,19 +68,28 @@ def fetch_trials():
     """Récupère les essais de phase 1-2 en oncologie."""
     url = "https://clinicaltrials.gov/api/v2/studies"
 
-    # Construire l'URL manuellement pour éviter l'encodage des caractères spéciaux
-    query_string = (
-        "query.cond=cancer+oncology+tumor"
-        "&filter.phase=PHASE1,PHASE2"
-        "&filter.overallStatus=RECRUITING"
-        "&pageSize=50"
-        "&format=json"
-    )
-    full_url = f"{url}?{query_string}"
-    r = requests.get(full_url, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    studies = data.get("studies", [])
+    # Deux requêtes séparées pour éviter les problèmes d'encodage avec les virgules
+    all_studies = []
+    for phase in ["PHASE1", "PHASE2"]:
+        full_url = (
+            f"{url}?query.cond=cancer+oncology+tumor"
+            f"&filter.phase={phase}"
+            f"&filter.overallStatus=RECRUITING"
+            f"&pageSize=25"
+            f"&format=json"
+        )
+        r = requests.get(full_url, timeout=30)
+        r.raise_for_status()
+        all_studies.extend(r.json().get("studies", []))
+
+    # Déduplication par NCT ID
+    seen = set()
+    studies = []
+    for s in all_studies:
+        nct = s.get("protocolSection", {}).get("identificationModule", {}).get("nctId", "")
+        if nct and nct not in seen:
+            seen.add(nct)
+            studies.append(s)
 
     trials = []
     for study in studies:
