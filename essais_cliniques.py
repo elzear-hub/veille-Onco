@@ -26,12 +26,11 @@ GITHUB_REPO    = os.environ["GITHUB_REPO"]
 MAX_ESSAIS = 5
 MEMORY_FILE = "sent_trials.json"
 
-# URLs RSS ClinicalTrials.gov — une par phase pour éviter tout problème
+# URL RSS officielle générée directement depuis ClinicalTrials.gov
+# Cancer · Phase 1 & 2 · Recruiting · triés par date de première publication
 RSS_URLS = [
-    "https://clinicaltrials.gov/rss.xml?rssfeed=findstudies&sel_flds=brief_title,overall_status,phase&query=cancer+oncology&recrs=a&phase=0&count=40",
-    "https://clinicaltrials.gov/rss.xml?rssfeed=findstudies&sel_flds=brief_title,overall_status,phase&query=cancer+oncology&recrs=a&phase=1&count=40",
+    "https://clinicaltrials.gov/api/rss?cond=cancer&aggFilters=phase%3A1+2%2Cstatus%3Arec&dateField=StudyFirstPostDate",
 ]
-# phase=0 = Phase 1, phase=1 = Phase 2 dans l'ancien système RSS
 # ─────────────────────────────────────────────────────────────────────────────
 
 
