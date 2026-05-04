@@ -3,7 +3,7 @@ name: Veille Essais Cliniques Hebdomadaire
 on:
   schedule:
     # Tous les vendredis à 8h heure de Paris (UTC+2 en été = 6h UTC)
-    - cron: '0 6 * * 5'
+    - cron: '0 8 * * 5'
   workflow_dispatch:
 
 permissions:
